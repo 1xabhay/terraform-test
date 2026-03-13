@@ -1,29 +1,31 @@
-.PHONY: check whoami init fmt validate plan apply test destroy
+.DEFAULT_GOAL := help
 
-check:
-	@test -n "$(AWS_PROFILE)" || (echo "Set AWS_PROFILE"; exit 1)
-	@test -n "$(AWS_REGION)" || (echo "Set AWS_REGION"; exit 1)
+.PHONY: help whoami init validate plan apply test
 
-whoami: check
-	aws sts get-caller-identity
+help:
+	@echo "make whoami"
+	@echo "make init"
+	@echo "make validate"
+	@echo "make plan"
+	@echo "make apply"
+	@echo "make test BUCKET=<bucket-name>"
 
-init: check
+whoami:
+	aws sts get-caller-identity --output json
+
+init:
 	terraform init
 
-fmt:
-	terraform fmt
-
-validate: check
+validate:
 	terraform validate
 
-plan: check
+plan:
 	terraform plan
 
-apply: check
-	terraform apply -auto-approve
+apply:
+	terraform apply
 
-test: check
-	aws s3api head-bucket --bucket "$$(terraform output -raw bucket_name)"
-
-destroy: check
-	terraform destroy -auto-approve
+test:
+	@test -n "$(BUCKET)" || (echo "BUCKET is required"; exit 1)
+	printf "terraform-s3-validation\n" | aws s3 cp - s3://$(BUCKET)/test.txt
+	aws s3 cp s3://$(BUCKET)/test.txt -
