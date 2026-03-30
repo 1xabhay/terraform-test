@@ -219,11 +219,147 @@ resource "aws_iam_instance_profile" "beanstalk_ec2" {
   role = aws_iam_role.beanstalk_ec2.name
 }
 
+# vpc configuration
+resource "aws_vpc" "chatlab_vpc" {
+  cidr_block       = "10.0.0.0/16"
+  instance_tenancy = "default"
+  tags = {
+    Name = "chatlab-vpc"
+  }
+}
+
+# 2 public subnets and 2 private subnets across 2 availability zones
+variable "public_subnet_cidrs" {
+  type        = list(string)
+  description = "List of CIDR blocks for public subnets"
+  default     = ["10.0.1.0/24", "10.0.2.0/24"]
+}
+variable "private_subnet_cidrs" {
+  type        = list(string)
+  description = "List of CIDR blocks for private subnets"
+  default     = ["10.0.3.0/24", "10.0.4.0/24"]
+}
+variable "availability_zones" {
+  type    = list(string)
+  default = ["us-east-1a", "us-east-1b"]
+}
+resource "aws_subnet" "public" {
+  count                   = length(var.public_subnet_cidrs)
+  vpc_id                  = aws_vpc.chatlab_vpc.id
+  cidr_block              = element(var.public_subnet_cidrs, count.index)
+  availability_zone       = element(var.availability_zones, count.index)
+  map_public_ip_on_launch = true
+  tags = {
+    Name = "chatlab-public-subnet-${count.index + 1}"
+  }
+}
+
+resource "aws_subnet" "private" {
+  count                   = length(var.private_subnet_cidrs)
+  vpc_id                  = aws_vpc.chatlab_vpc.id
+  cidr_block              = element(var.private_subnet_cidrs, count.index)
+  availability_zone       = element(var.availability_zones, count.index)
+  map_public_ip_on_launch = false
+  tags = {
+    Name = "chatlab-private-subnet-${count.index + 1}"
+  }
+}
+resource "aws_internet_gateway" "gw" {
+  vpc_id = aws_vpc.chatlab_vpc.id
+  tags = {
+    Name = "chatlab-igw"
+  }
+}
+resource "aws_route_table" "secondary_route_table" {
+  vpc_id = aws_vpc.chatlab_vpc.id
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.gw.id
+  }
+  tags = {
+    Name = "chatlab-public-rt"
+  }
+
+}
+resource "aws_route_table_association" "public_subnet_association" {
+  count          = length(var.public_subnet_cidrs)
+  subnet_id      = element(aws_subnet.public[*].id, count.index)
+  route_table_id = aws_route_table.secondary_route_table.id
+}
+
+resource "aws_eip" "nat" {
+  domain = "vpc"
+
+  depends_on = [aws_internet_gateway.gw]
+
+  tags = {
+    Name = "chatlab-nat-eip"
+  }
+}
+
+resource "aws_nat_gateway" "main" {
+  allocation_id = aws_eip.nat.id
+  subnet_id     = aws_subnet.public[0].id
+
+  depends_on = [aws_internet_gateway.gw]
+
+  tags = {
+    Name = "chatlab-nat"
+  }
+}
+
+resource "aws_route_table" "private_route_table" {
+  vpc_id = aws_vpc.chatlab_vpc.id
+
+  route {
+    cidr_block     = "0.0.0.0/0"
+    nat_gateway_id = aws_nat_gateway.main.id
+  }
+
+  tags = {
+    Name = "chatlab-private-rt"
+  }
+}
+
+resource "aws_route_table_association" "private_subnet_association" {
+  count          = length(var.private_subnet_cidrs)
+  subnet_id      = element(aws_subnet.private[*].id, count.index)
+  route_table_id = aws_route_table.private_route_table.id
+}
+
+# s3 bucket for beanstalk application versions
+resource "aws_s3_bucket" "beanstalk_app_versions" {
+  bucket = "${aws_elastic_beanstalk_application.chatlab.name}-app-versions"
+  tags = {
+    Purpose = "beanstalk-deployments"
+  }
+}
+
+data "aws_caller_identity" "current" {}
+
+# upload the application zip
+resource "aws_s3_object" "app_version_zip" {
+  bucket = aws_s3_bucket.beanstalk_app_versions.id
+  key    = "versions/v1.0.0.zip"
+  source = "chatlab-app-version.zip"
+  etag   = filemd5("chatlab-app-version.zip")
+}
+
+# register application version
+resource "aws_elastic_beanstalk_application_version" "v1" {
+  name        = "v1.0.0"
+  application = aws_elastic_beanstalk_application.chatlab.name
+  description = "Application version 1.0.0"
+  bucket      = aws_s3_bucket.beanstalk_app_versions.id
+  key         = aws_s3_object.app_version_zip.key
+}
+
 # beanstalk environment
 resource "aws_elastic_beanstalk_environment" "production" {
   name                = "production"
   application         = aws_elastic_beanstalk_application.chatlab.name
   solution_stack_name = "64bit Amazon Linux 2023 v4.11.0 running Docker"
+  version_label       = aws_elastic_beanstalk_application_version.v1.name
 
   # settings
   setting {
@@ -237,6 +373,11 @@ resource "aws_elastic_beanstalk_environment" "production" {
     value     = "application"
   }
   setting {
+    namespace = "aws:elasticbeanstalk:environment"
+    name      = "ServiceRole"
+    value     = aws_iam_role.beanstalk_service_role.arn
+  }
+  setting {
     namespace = "aws:autoscaling:launchconfiguration"
     name      = "IamInstanceProfile"
     value     = aws_iam_instance_profile.beanstalk_ec2.name
@@ -245,6 +386,34 @@ resource "aws_elastic_beanstalk_environment" "production" {
     namespace = "aws:autoscaling:launchconfiguration"
     name      = "InstanceType"
     value     = "t3.small"
+  }
+
+  # vpc configuration
+  setting {
+    namespace = "aws:ec2:vpc"
+    name      = "VPCId"
+    value     = aws_vpc.chatlab_vpc.id
+  }
+  setting {
+    namespace = "aws:ec2:vpc"
+    name      = "AssociatePublicIpAddress"
+    value     = "false"
+  }
+  setting {
+    namespace = "aws:ec2:vpc"
+    name      = "ELBScheme"
+    value     = "public"
+  }
+  setting {
+    namespace = "aws:ec2:vpc"
+    name      = "Subnets"
+    value     = join(",", aws_subnet.private[*].id)
+  }
+  setting {
+    namespace = "aws:ec2:vpc"
+    name      = "ELBSubnets"
+    value     = join(",", aws_subnet.public[*].id)
+
   }
 
   # autoscaling configuration
@@ -299,7 +468,7 @@ resource "aws_elastic_beanstalk_environment" "production" {
   # env var
   setting {
     namespace = "aws:elasticbeanstalk:application:environment"
-    name      = "Surveillance for Surveillance"
+    name      = "Surveillance"
     value     = "WASSSAAAPPPP 6"
   }
 }
