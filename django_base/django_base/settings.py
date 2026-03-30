@@ -10,10 +10,20 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/6.0/ref/settings/
 """
 
+import os
 from pathlib import Path
+
+from django.core.exceptions import ImproperlyConfigured
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+
+def required_env(name: str) -> str:
+    value = os.getenv(name)
+    if value:
+        return value
+    raise ImproperlyConfigured(f"Missing required environment variable: {name}")
 
 
 # Quick-start development settings - unsuitable for production
@@ -25,7 +35,11 @@ SECRET_KEY = 'django-insecure-c$jr)8tp7j(iy%__%k30-jnwp-z#yd15^alu%7b_f0@gc*o$_7
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = [
+    host.strip()
+    for host in os.getenv("ALLOWED_HOSTS", "*").split(",")
+    if host.strip()
+]
 
 
 # Application definition
@@ -74,8 +88,12 @@ WSGI_APPLICATION = 'django_base.wsgi.application'
 
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': required_env('DB_NAME'),
+        'USER': required_env('DB_USER'),
+        'PASSWORD': required_env('DB_PASSWORD'),
+        'HOST': required_env('DB_HOST'),
+        'PORT': os.getenv('DB_PORT', '5432'),
     }
 }
 

@@ -15,8 +15,22 @@ Including another URLconf
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
 from django.contrib import admin
+from django.db import DatabaseError, connection
+from django.http import JsonResponse
 from django.urls import path
+
+
+def db_health(_request):
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT 1")
+            cursor.fetchone()
+    except DatabaseError:
+        return JsonResponse({"database": "error"}, status=503)
+    return JsonResponse({"database": "ok"})
+
 
 urlpatterns = [
     path('admin/', admin.site.urls),
+    path('health/db/', db_health),
 ]

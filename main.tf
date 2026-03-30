@@ -5,12 +5,34 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.0"
     }
+    archive = {
+      source  = "hashicorp/archive"
+      version = "~> 2.5"
+    }
   }
 }
 
 # variables
 variable "aws_region" {
   default = "us-east-1"
+}
+
+variable "db_name" {
+  description = "Name of the Postgres database"
+  type        = string
+  default     = "chatlab"
+}
+
+variable "db_username" {
+  description = "Username for the Postgres database"
+  type        = string
+  default     = "chatlab"
+}
+
+variable "db_password" {
+  description = "Password for the Postgres database"
+  type        = string
+  sensitive   = true
 }
 
 # locals
@@ -327,6 +349,113 @@ resource "aws_route_table_association" "private_subnet_association" {
   route_table_id = aws_route_table.private_route_table.id
 }
 
+resource "aws_security_group" "beanstalk_alb" {
+  name        = "chatlab-beanstalk-alb"
+  description = "Public access to the Elastic Beanstalk load balancer"
+  vpc_id      = aws_vpc.chatlab_vpc.id
+
+  ingress {
+    description = "HTTP from the internet"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "chatlab-beanstalk-alb"
+  }
+}
+
+resource "aws_security_group" "beanstalk_instance" {
+  name        = "chatlab-beanstalk-instance"
+  description = "App-tier access for Elastic Beanstalk EC2 instances"
+  vpc_id      = aws_vpc.chatlab_vpc.id
+
+  ingress {
+    description     = "HTTP from the Elastic Beanstalk load balancer"
+    from_port       = 80
+    to_port         = 80
+    protocol        = "tcp"
+    security_groups = [aws_security_group.beanstalk_alb.id]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "chatlab-beanstalk-instance"
+  }
+}
+
+resource "aws_security_group" "rds" {
+  name        = "chatlab-rds"
+  description = "Postgres access from the Elastic Beanstalk app tier only"
+  vpc_id      = aws_vpc.chatlab_vpc.id
+
+  ingress {
+    description     = "Postgres from Elastic Beanstalk instances"
+    from_port       = 5432
+    to_port         = 5432
+    protocol        = "tcp"
+    security_groups = [aws_security_group.beanstalk_instance.id]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "chatlab-rds"
+  }
+}
+
+resource "aws_db_subnet_group" "chatlab" {
+  name       = "chatlab-private-db"
+  subnet_ids = aws_subnet.private[*].id
+
+  tags = {
+    Name = "chatlab-private-db"
+  }
+}
+
+resource "aws_db_instance" "chatlab" {
+  identifier             = "chatlab-postgres"
+  allocated_storage      = 20
+  storage_type           = "gp3"
+  engine                 = "postgres"
+  instance_class         = "db.t3.micro"
+  db_name                = var.db_name
+  username               = var.db_username
+  password               = var.db_password
+  port                   = 5432
+  multi_az               = false
+  publicly_accessible    = false
+  storage_encrypted      = true
+  skip_final_snapshot    = true
+  deletion_protection    = false
+  db_subnet_group_name   = aws_db_subnet_group.chatlab.name
+  vpc_security_group_ids = [aws_security_group.rds.id]
+
+  tags = {
+    Name = "chatlab-postgres"
+  }
+}
+
 # s3 bucket for beanstalk application versions
 resource "aws_s3_bucket" "beanstalk_app_versions" {
   bucket = "${aws_elastic_beanstalk_application.chatlab.name}-app-versions"
@@ -337,12 +466,18 @@ resource "aws_s3_bucket" "beanstalk_app_versions" {
 
 data "aws_caller_identity" "current" {}
 
+data "archive_file" "chatlab_app" {
+  type        = "zip"
+  source_dir  = "${path.module}/django_base"
+  output_path = "${path.module}/chatlab-app-version.zip"
+}
+
 # upload the application zip
 resource "aws_s3_object" "app_version_zip" {
   bucket = aws_s3_bucket.beanstalk_app_versions.id
   key    = "versions/v1.0.0.zip"
-  source = "chatlab-app-version.zip"
-  etag   = filemd5("chatlab-app-version.zip")
+  source = data.archive_file.chatlab_app.output_path
+  etag   = data.archive_file.chatlab_app.output_md5
 }
 
 # register application version
@@ -387,6 +522,11 @@ resource "aws_elastic_beanstalk_environment" "production" {
     name      = "InstanceType"
     value     = "t3.small"
   }
+  setting {
+    namespace = "aws:autoscaling:launchconfiguration"
+    name      = "SecurityGroups"
+    value     = aws_security_group.beanstalk_instance.id
+  }
 
   # vpc configuration
   setting {
@@ -403,6 +543,11 @@ resource "aws_elastic_beanstalk_environment" "production" {
     namespace = "aws:ec2:vpc"
     name      = "ELBScheme"
     value     = "public"
+  }
+  setting {
+    namespace = "aws:elbv2:loadbalancer"
+    name      = "SecurityGroups"
+    value     = aws_security_group.beanstalk_alb.id
   }
   setting {
     namespace = "aws:ec2:vpc"
@@ -471,6 +616,31 @@ resource "aws_elastic_beanstalk_environment" "production" {
     name      = "Surveillance"
     value     = "WASSSAAAPPPP 6"
   }
+  setting {
+    namespace = "aws:elasticbeanstalk:application:environment"
+    name      = "DB_HOST"
+    value     = aws_db_instance.chatlab.address
+  }
+  setting {
+    namespace = "aws:elasticbeanstalk:application:environment"
+    name      = "DB_PORT"
+    value     = tostring(aws_db_instance.chatlab.port)
+  }
+  setting {
+    namespace = "aws:elasticbeanstalk:application:environment"
+    name      = "DB_NAME"
+    value     = var.db_name
+  }
+  setting {
+    namespace = "aws:elasticbeanstalk:application:environment"
+    name      = "DB_USER"
+    value     = var.db_username
+  }
+  setting {
+    namespace = "aws:elasticbeanstalk:application:environment"
+    name      = "DB_PASSWORD"
+    value     = var.db_password
+  }
 }
 
 # outputs
@@ -495,4 +665,19 @@ output "environment_cname" {
 output "application_name" {
   description = "Name of the Elastic Beanstalk application"
   value       = aws_elastic_beanstalk_application.chatlab.name
+}
+
+output "rds_endpoint" {
+  description = "Endpoint of the RDS instance"
+  value       = aws_db_instance.chatlab.address
+}
+
+output "rds_port" {
+  description = "Port of the RDS instance"
+  value       = aws_db_instance.chatlab.port
+}
+
+output "rds_db_name" {
+  description = "Database name for the RDS instance"
+  value       = var.db_name
 }
