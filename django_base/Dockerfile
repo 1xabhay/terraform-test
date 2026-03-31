@@ -5,7 +5,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-RUN python -m pip install --no-cache-dir "Django==6.0.3" "psycopg[binary]>=3.2,<4"
+RUN python -m pip install --no-cache-dir "Django==6.0.3" "psycopg[binary]>=3.2,<4" "redis>=5,<7"
 
 COPY manage.py /app/
 COPY django_base /app/django_base/

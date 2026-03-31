@@ -424,12 +424,76 @@ resource "aws_security_group" "rds" {
   }
 }
 
+resource "aws_security_group" "redis" {
+  name        = "chatlab-redis"
+  description = "Redis access from the Elastic Beanstalk app tier only"
+  vpc_id      = aws_vpc.chatlab_vpc.id
+
+  tags = {
+    Name = "chatlab-redis"
+  }
+}
+
+resource "aws_vpc_security_group_ingress_rule" "redis_from_beanstalk" {
+  security_group_id            = aws_security_group.redis.id
+  referenced_security_group_id = aws_security_group.beanstalk_instance.id
+  description                  = "Redis from Elastic Beanstalk instances"
+  from_port                    = 6379
+  to_port                      = 6379
+  ip_protocol                  = "tcp"
+}
+
+resource "aws_vpc_security_group_egress_rule" "redis_all" {
+  security_group_id = aws_security_group.redis.id
+  cidr_ipv4         = "0.0.0.0/0"
+  ip_protocol       = "-1"
+}
+
 resource "aws_db_subnet_group" "chatlab" {
   name       = "chatlab-private-db"
   subnet_ids = aws_subnet.private[*].id
 
   tags = {
     Name = "chatlab-private-db"
+  }
+}
+
+resource "aws_elasticache_subnet_group" "chatlab_cache" {
+  name       = "chatlab-private-cache"
+  subnet_ids = aws_subnet.private[*].id
+
+  tags = {
+    Name = "chatlab-private-cache"
+  }
+}
+
+resource "aws_elasticache_parameter_group" "chatlab_cache" {
+  name   = "chatlab-redis7"
+  family = "redis7"
+
+  parameter {
+    name  = "maxmemory-policy"
+    value = "allkeys-lru"
+  }
+
+  tags = {
+    Name = "chatlab-redis7"
+  }
+}
+
+resource "aws_elasticache_cluster" "chatlab_cache" {
+  cluster_id           = "chatlab-redis"
+  engine               = "redis"
+  engine_version       = "7.1"
+  node_type            = "cache.t4g.micro"
+  num_cache_nodes      = 1
+  port                 = 6379
+  parameter_group_name = aws_elasticache_parameter_group.chatlab_cache.name
+  subnet_group_name    = aws_elasticache_subnet_group.chatlab_cache.name
+  security_group_ids   = [aws_security_group.redis.id]
+
+  tags = {
+    Name = "chatlab-redis"
   }
 }
 
@@ -618,6 +682,11 @@ resource "aws_elastic_beanstalk_environment" "production" {
   }
   setting {
     namespace = "aws:elasticbeanstalk:application:environment"
+    name      = "CACHE_URL"
+    value     = "redis://${aws_elasticache_cluster.chatlab_cache.cache_nodes[0].address}:${aws_elasticache_cluster.chatlab_cache.port}/0"
+  }
+  setting {
+    namespace = "aws:elasticbeanstalk:application:environment"
     name      = "DB_HOST"
     value     = aws_db_instance.chatlab.address
   }
@@ -680,4 +749,14 @@ output "rds_port" {
 output "rds_db_name" {
   description = "Database name for the RDS instance"
   value       = var.db_name
+}
+
+output "redis_endpoint" {
+  description = "Endpoint of the Redis cache"
+  value       = aws_elasticache_cluster.chatlab_cache.cache_nodes[0].address
+}
+
+output "redis_port" {
+  description = "Port of the Redis cache"
+  value       = aws_elasticache_cluster.chatlab_cache.port
 }

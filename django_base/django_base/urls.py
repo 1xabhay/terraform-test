@@ -15,9 +15,12 @@ Including another URLconf
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
 from django.contrib import admin
+from django.core.cache import cache
+from django.conf import settings
 from django.db import DatabaseError, connection
 from django.http import JsonResponse
 from django.urls import path
+import socket
 
 
 def db_health(_request):
@@ -30,7 +33,37 @@ def db_health(_request):
     return JsonResponse({"database": "ok"})
 
 
+def cache_health(_request):
+    cache_key = "health:cache:counter"
+
+    try:
+        cache.add(cache_key, 0, timeout=60)
+        counter = cache.incr(cache_key)
+        stored_value = cache.get(cache_key)
+    except Exception as exc:
+        return JsonResponse(
+            {
+                "cache": "error",
+                "backend": settings.CACHES["default"]["BACKEND"],
+                "detail": str(exc),
+            },
+            status=503,
+        )
+
+    return JsonResponse(
+        {
+            "cache": "ok",
+            "backend": settings.CACHES["default"]["BACKEND"],
+            "location": settings.CACHES["default"].get("LOCATION", "local-memory"),
+            "hostname": socket.gethostname(),
+            "counter": counter,
+            "stored_value": stored_value,
+        }
+    )
+
+
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('health/db/', db_health),
+    path('health/cache/', cache_health),
 ]
